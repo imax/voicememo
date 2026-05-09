@@ -76,6 +76,20 @@ Recordings come off the device as `YYMMDD_HHMM[_NN].mp3`:
 
 `transcribe.py` parses this to date-bucket and time-sort entries.
 
+## Obsidian integration (optional)
+
+Symlink the memos directory into your vault so daily transcripts show up
+alongside other notes:
+
+```bash
+ln -s "$HOME/Sony/Memos" "$HOME/vaults/main/Memos"
+```
+
+`~/Sony/Memos/` stays the canonical location; the vault just sees through the
+symlink. Obsidian indexes and searches the contents normally. If your vault
+is git-tracked, decide whether to commit the symlink (portable across Macs
+with the same paths) or add `Memos` to the vault's `.gitignore`.
+
 ## Manual operations
 
 ```bash

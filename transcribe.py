@@ -153,17 +153,47 @@ def transcribe_one(mp3: Path, out_txt: Path, api_key: str | None) -> bool:
     return transcribe_via_local(mp3, out_txt)
 
 
-def merge_day(date: str, entries: list) -> Path:
-    out = MEMOS_DIR / f"{date}.md"
+MONTH_NAMES = [
+    "", "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+# Ukrainian month names in genitive case ("9 травня", "1 січня").
+UK_MONTHS_GEN = [
+    "", "січня", "лютого", "березня", "квітня", "травня", "червня",
+    "липня", "серпня", "вересня", "жовтня", "листопада", "грудня",
+]
+
+
+def format_uk_date(iso_date: str) -> str:
+    _, mm, dd = iso_date.split("-")
+    return f"{int(dd)} {UK_MONTHS_GEN[int(mm)]}"
+
+
+def merge_month(year: int, month: int, entries: list) -> Path:
+    # Filename "May 2026.md". No H1 — filename is the title.
+    # Reverse-chronological: newest day on top, newest recording within a day on top.
+    # Day header: ## 9 травня. Recording header: **HH:MM**.
+    out = MEMOS_DIR / f"{MONTH_NAMES[month]} {year}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"# {date}", ""]
+
+    entries = list(reversed(entries))
+
+    lines = []
+    current_date = None
     for e in entries:
+        if e["date"] != current_date:
+            if current_date is not None:
+                lines.append("")
+            lines.append(f"## {format_uk_date(e['date'])}")
+            lines.append("")
+            current_date = e["date"]
         suffix = f" (cont. {e['segment']})" if e["segment"] else ""
-        lines.append(f"## {e['time']}{suffix}")
+        lines.append(f"**{e['time']}{suffix}**")
         lines.append("")
         lines.append(e["text"].strip())
         lines.append("")
-    out.write_text("\n".join(lines) + "\n")
+    out.write_text("\n".join(lines).lstrip("\n"))
     return out
 
 
@@ -184,7 +214,7 @@ def main() -> int:
         if transcribe_one(mp3, cached, api_key):
             new_count += 1
 
-    by_day: dict[str, list[dict]] = defaultdict(list)
+    by_month: dict[tuple[int, int], list[dict]] = defaultdict(list)
     for txt in CACHE_DIR.glob("*.txt"):
         info = parse_name(txt.stem)
         if not info:
@@ -192,23 +222,25 @@ def main() -> int:
         text = txt.read_text().strip()
         if not text:
             continue
-        by_day[info["date"]].append({
+        year, month = info["sort_key"][0], info["sort_key"][1]
+        by_month[(year, month)].append({
+            "date": info["date"],
             "time": info["time"],
             "segment": info["segment"],
             "sort_key": info["sort_key"],
             "text": text,
         })
 
-    days_written = []
-    for date, entries in by_day.items():
+    months_written = []
+    for (year, month), entries in by_month.items():
         entries.sort(key=lambda e: e["sort_key"])
-        merge_day(date, entries)
-        days_written.append(date)
+        merge_month(year, month, entries)
+        months_written.append(f"{MONTH_NAMES[month]} {year}")
 
-    log(f"done: {new_count} new transcript(s), {len(days_written)} day file(s)")
+    log(f"done: {new_count} new transcript(s), {len(months_written)} month file(s)")
 
     if new_count > 0:
-        latest = sorted(days_written)[-3:]
+        latest = sorted(months_written)[-2:]
         msg = f"{new_count} new memo(s) → {', '.join(latest)}"
         subprocess.run(
             ["osascript", "-e", f'display notification "{msg}" with title "Memos transcribed"'],
