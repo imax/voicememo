@@ -1,0 +1,8 @@
+# Never commit local secrets or test artifacts.
+api_key
+*.key
+*.secret
+.env
+.env.*
+*.mp3
+*.wav
