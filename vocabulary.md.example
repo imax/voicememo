@@ -1,0 +1,49 @@
+# Voicememo vocabulary
+
+User-specific terms the speech model gets wrong. The transcribe script reads
+every non-empty, non-heading line from this file and passes them to the
+OpenAI transcription API as the `prompt` hint — a vocabulary bias for
+decoding.
+
+How to edit:
+- Add a word per line, or a few comma-separated. Both work.
+- Group however you like under `##` headings — they're skipped at parse time.
+- Lines starting with `#` and blank lines are ignored.
+- The whole file is one bag of words — order and section names don't reach the API.
+
+What belongs here:
+- Names of family, friends, colleagues you mention by name.
+- Niche brands/platforms the model probably doesn't know (local startups,
+  internal tools, regional services).
+- Your project codenames.
+- Local street, neighborhood, or venue names that get mangled in your area.
+
+What does NOT belong:
+- Global brands (Sony, Audi, Tesla, ChatGPT, Twitter) — already known.
+- Major cities or countries — already known.
+- Generic English jargon (API, AI, podcast) — already known.
+- Famous public figures — already known.
+
+The prompt has a ~200-word effective ceiling, so every general term you
+add displaces a genuinely useful one. Keep it tight.
+
+After editing, future recordings pick up the new vocab automatically. To
+re-transcribe existing memos with the new vocab, delete their cached
+transcript: `rm ~/Documents/Sony/.cache/transcripts/<basename>.txt`.
+
+---
+
+## Family
+<!-- e.g. Юля, Соня, Саша -->
+
+## People
+<!-- Friends, colleagues, regular collaborators. -->
+
+## Local brands and platforms
+<!-- e.g. DOU, Djinni — services well-known in your region but not globally. -->
+
+## Project codenames
+<!-- Internal product or feature names you talk about. -->
+
+## Local places
+<!-- Street / neighborhood / venue names the model mishears. -->

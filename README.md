@@ -8,10 +8,13 @@ Auto-sync + transcription pipeline for a Sony IC Recorder on macOS.
 2. macOS launchd fires `sync-ic-recorder.sh` on the mount event.
 3. The script `rsync`s new `.mp3`s from `REC_FILE/FOLDER01/` to `~/Sony/Files/`.
 4. It then kicks off `transcribe.py` in the background.
-5. Each new mp3 is transcribed once (via OpenAI's `gpt-4o-transcribe`) and
-   cached under `~/Sony/.cache/transcripts/<basename>.txt`.
-6. All transcripts for a given day get merged into `~/Sony/Memos/YYYY-MM-DD.md`,
-   sorted by recording time.
+5. Each new mp3 is transcribed once (via OpenAI's `gpt-4o-transcribe`, biased
+   with your personal vocabulary) and cached under
+   `~/Sony/.cache/transcripts/<basename>.txt`.
+6. Long transcripts get a paragraph-split pass via `gpt-4o-mini` and land in
+   `~/Sony/.cache/processed/<basename>.txt` (short ones are copied through).
+7. All processed transcripts for a given month get merged into
+   `~/Sony/Memos/<Month YYYY>.md`, reverse-chronological.
 
 You get two macOS notifications: "IC Recorder synced" right after copy,
 "Memos transcribed" once the API responses come back.
@@ -51,8 +54,48 @@ filling `~/.config/openai/api_key`.
 Tweak via env vars:
 - `OPENAI_TRANSCRIBE_MODEL` — defaults to `gpt-4o-transcribe`. Try `whisper-1`
   for cheaper, `gpt-4o-mini-transcribe` for cheaper still.
+- `OPENAI_POSTPROCESS_MODEL` — chat model used for paragraph splitting.
+  Defaults to `gpt-4o-mini` (~$0.0001 per long memo).
 - `WHISPER_LANG` — defaults to `uk`.
 - `WHISPER_MODEL` — local-fallback model, defaults to `large-v3`.
+- `VOICEMEMO_VOCAB_FILE` — override path to vocabulary.md.
+- `VOICEMEMO_PARAGRAPH_MIN_CHARS` — texts shorter than this skip the
+  paragraph-split step. Default `400`.
+- `VOICEMEMO_SKIP_POSTPROCESS=1` — disable paragraph-splitting entirely.
+
+## Vocabulary (transcription quality)
+
+`gpt-4o-transcribe` handles Ukrainian prose well but has no idea who your
+kids are, what your projects are called, or what niche local platforms you
+mention. Hence "Маршалокриптоавтосінка" instead of "Marshall crypto auto
+sync", or "джині" instead of "Djinni".
+
+The API's `prompt` parameter takes a vocabulary hint that biases decoding.
+We keep it in a plain Markdown file at `~/.config/voicememo/vocabulary.md`
+(seeded from `vocabulary.md.example`). Group words under any `##` headings;
+everything before the first heading is treated as preamble.
+
+**Only user-specific terms belong here** — names of people, niche brands,
+project codenames, local places. Don't add global brands, major cities, or
+generic English jargon: the model already knows them, and every general
+term displaces a useful one (the prompt has a ~200-word effective ceiling).
+
+After editing, future recordings pick up the new vocab automatically. To
+re-apply vocab to existing memos, delete their raw transcript:
+```bash
+rm ~/Documents/Sony/.cache/transcripts/<basename>.txt
+~/bin/transcribe-memos.py
+```
+
+## Paragraph splitting
+
+Single-blob transcripts of long memos are hard to skim. After transcription,
+texts longer than `VOICEMEMO_PARAGRAPH_MIN_CHARS` (default 400) get a second
+pass through `gpt-4o-mini` with a strict prompt: insert paragraph breaks at
+topic shifts, change zero words. The result lands in
+`~/Sony/.cache/processed/`, separate from the raw cache so you can blow away
+processed/ and re-paragraph everything (free, no transcribe API calls) after
+tweaking the prompt.
 
 ## File layout
 
@@ -60,7 +103,9 @@ Tweak via env vars:
 $SONY_BASE/Files/                  copied mp3s          (default: ~/Documents/Sony/Files/)
 $SONY_BASE/Memos/<Month YYYY>.md   monthly transcripts   (default: ~/Documents/Sony/Memos/)
 $SONY_BASE/.cache/transcripts/     per-mp3 raw transcripts (idempotency cache)
+$SONY_BASE/.cache/processed/       paragraph-split versions; what merge reads
 ~/.config/voicememo/config.sh      shared config (sourced by sync.sh + transcribe.py)
+~/.config/voicememo/vocabulary.md  vocab hint passed to the transcription API
 ~/.config/openai/api_key           OpenAI key, chmod 600 (gitignored, never in repo)
 ~/bin/sync-ic-recorder.sh          symlink → repo
 ~/bin/transcribe-memos.py          symlink → repo
@@ -115,7 +160,11 @@ with the same paths) or add `Memos` to the vault's `.gitignore`.
 ~/bin/transcribe-memos.py
 
 # Re-transcribe everything from scratch (will re-spend on cloud)
-rm -rf ~/Sony/.cache/transcripts/* ~/Sony/Memos/*.md
+rm -rf ~/Sony/.cache/transcripts/* ~/Sony/.cache/processed/* ~/Sony/Memos/*.md
+~/bin/transcribe-memos.py
+
+# Re-paragraph everything (cheap — only the post-process LLM, no transcribe)
+rm -rf ~/Sony/.cache/processed/*
 ~/bin/transcribe-memos.py
 
 # Reload the LaunchAgent after editing the plist

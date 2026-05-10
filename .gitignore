@@ -6,3 +6,4 @@ api_key
 .env.*
 *.mp3
 *.wav
+__pycache__/

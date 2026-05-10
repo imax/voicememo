@@ -44,6 +44,10 @@ if [ ! -f "$HOME/.config/voicememo/config.sh" ]; then
   cp "$REPO_DIR/config.sh.example" "$HOME/.config/voicememo/config.sh"
   echo "==> seeded $HOME/.config/voicememo/config.sh"
 fi
+if [ ! -f "$HOME/.config/voicememo/vocabulary.md" ]; then
+  cp "$REPO_DIR/vocabulary.md.example" "$HOME/.config/voicememo/vocabulary.md"
+  echo "==> seeded $HOME/.config/voicememo/vocabulary.md (edit to add your names/brands)"
+fi
 . "$HOME/.config/voicememo/config.sh"
 SONY_BASE="${SONY_BASE:-$HOME/Documents/Sony}"
 echo "==> SONY_BASE=$SONY_BASE"
@@ -54,6 +58,7 @@ mkdir -p \
   "$SONY_BASE/Files" \
   "$SONY_BASE/Memos" \
   "$SONY_BASE/.cache/transcripts" \
+  "$SONY_BASE/.cache/processed" \
   "$HOME/Library/LaunchAgents" \
   "$HOME/Library/Logs"
 

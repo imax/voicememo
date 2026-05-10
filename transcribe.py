@@ -24,6 +24,7 @@ Idempotent. Safe to run on a schedule or after every sync.
 # doesn't support PEP 604 `X | Y` annotations. This makes annotations lazy.
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -38,6 +39,8 @@ HOME = Path.home()
 LOG_FILE = HOME / "Library" / "Logs" / "transcribe-memos.log"
 KEY_FILE = HOME / ".config" / "openai" / "api_key"
 CONFIG_FILE = HOME / ".config" / "voicememo" / "config.sh"
+VOCAB_FILE = Path(os.environ.get("VOICEMEMO_VOCAB_FILE",
+                                 HOME / ".config" / "voicememo" / "vocabulary.md"))
 
 
 def _load_shared_config() -> dict:
@@ -63,12 +66,20 @@ BASE_DIR = Path(_cfg.get("SONY_BASE", str(HOME / "Documents" / "Sony")))
 SRC_DIR = BASE_DIR / "Files"
 MEMOS_DIR = BASE_DIR / "Memos"
 CACHE_DIR = BASE_DIR / ".cache" / "transcripts"
+PROCESSED_DIR = BASE_DIR / ".cache" / "processed"
 
 API_URL = "https://api.openai.com/v1/audio/transcriptions"
+CHAT_URL = "https://api.openai.com/v1/chat/completions"
 API_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+POSTPROCESS_MODEL = os.environ.get("OPENAI_POSTPROCESS_MODEL", "gpt-4o-mini")
 LANG = os.environ.get("WHISPER_LANG", "uk")
 LOCAL_WHISPER_BIN = shutil.which("whisper")
 LOCAL_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
+
+# Texts shorter than this (chars) skip the paragraph-split post-process —
+# they're already one thought, no point spending an API call.
+PARAGRAPH_MIN_CHARS = int(os.environ.get("VOICEMEMO_PARAGRAPH_MIN_CHARS", "400"))
+SKIP_POSTPROCESS = bool(os.environ.get("VOICEMEMO_SKIP_POSTPROCESS"))
 
 NAME_RE = re.compile(r"^(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(?:_(\d+))?$")
 
@@ -88,6 +99,48 @@ def get_api_key() -> str | None:
     return None
 
 
+def load_vocabulary() -> str:
+    """Read vocabulary.md and flatten into a comma-separated prompt hint.
+
+    The model uses the prompt as a vocabulary bias for decoding — proper nouns,
+    English brand names, and domain terms become much more likely to surface
+    with their canonical spelling instead of phonetic Cyrillic mangling.
+    """
+    if not VOCAB_FILE.exists():
+        return ""
+    terms: list[str] = []
+    in_vocab = False  # skip the preamble; vocab starts at the first `##`
+    for raw in VOCAB_FILE.read_text().splitlines():
+        line = raw.strip()
+        if line.startswith("##"):
+            in_vocab = True
+            continue
+        if not in_vocab:
+            continue
+        if not line or line.startswith("#") or line.startswith("<!--"):
+            continue
+        for token in line.split(","):
+            t = token.strip().rstrip(".")
+            if t:
+                terms.append(t)
+    if not terms:
+        return ""
+    # Seed sentence helps the model treat the list as vocabulary rather than
+    # content to transcribe. Ukrainian framing matches the audio language.
+    return "Можливі імена, бренди, місця та терміни: " + ", ".join(terms) + "."
+
+
+def _write_curl_config(api_key: str, json_body: bool = False) -> str:
+    """Write a chmod-600 curl config with the auth header. Caller unlinks it."""
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".curlrc") as cfg:
+        os.chmod(cfg.name, 0o600)
+        cfg.write(f'header = "Authorization: Bearer {api_key}"\n')
+        if json_body:
+            cfg.write('header = "Content-Type: application/json"\n')
+        cfg.write("silent\nshow-error\nfail\n")
+        return cfg.name
+
+
 def parse_name(stem: str):
     m = NAME_RE.match(stem)
     if not m:
@@ -102,15 +155,8 @@ def parse_name(stem: str):
     }
 
 
-def transcribe_via_openai(mp3: Path, out_txt: Path, api_key: str) -> bool:
-    # Use a curl config file to keep the auth header out of `ps` output.
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".curlrc") as cfg:
-        os.chmod(cfg.name, 0o600)
-        cfg.write(f'header = "Authorization: Bearer {api_key}"\n')
-        cfg.write("silent\n")
-        cfg.write("show-error\n")
-        cfg.write("fail\n")
-        cfg_path = cfg.name
+def transcribe_via_openai(mp3: Path, out_txt: Path, api_key: str, vocab_prompt: str) -> bool:
+    cfg_path = _write_curl_config(api_key)
     try:
         cmd = [
             "curl", "-K", cfg_path,
@@ -120,6 +166,8 @@ def transcribe_via_openai(mp3: Path, out_txt: Path, api_key: str) -> bool:
             "-F", f"language={LANG}",
             "-F", "response_format=text",
         ]
+        if vocab_prompt:
+            cmd += ["-F", f"prompt={vocab_prompt}"]
         log(f"openai transcribe: {mp3.name}")
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -174,10 +222,86 @@ def transcribe_via_local(mp3: Path, out_txt: Path) -> bool:
     return True
 
 
-def transcribe_one(mp3: Path, out_txt: Path, api_key: str | None) -> bool:
+def transcribe_one(mp3: Path, out_txt: Path, api_key: str | None, vocab_prompt: str) -> bool:
     if api_key:
-        return transcribe_via_openai(mp3, out_txt, api_key)
+        return transcribe_via_openai(mp3, out_txt, api_key, vocab_prompt)
     return transcribe_via_local(mp3, out_txt)
+
+
+def split_paragraphs(text: str, api_key: str) -> str:
+    """Insert paragraph breaks into a single-blob transcript via a chat model.
+
+    Strict instruction: do not change a single word. The model can be greedy
+    about "fixing" punctuation if you let it, so we always keep the raw cache
+    as ground truth and treat this output as a presentation layer.
+    """
+    system = (
+        "You receive a transcript of a Ukrainian voice memo, returned as one "
+        "long paragraph. Split it into paragraphs by inserting a blank line "
+        "between paragraphs wherever the topic, scene, or train of thought "
+        "shifts. Do NOT change any words. Do NOT fix spelling, punctuation, "
+        "or grammar. Do NOT add or remove anything. Return ONLY the original "
+        "text with paragraph breaks inserted — no preamble, no commentary, "
+        "no quotes around the output."
+    )
+    payload = {
+        "model": POSTPROCESS_MODEL,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": text},
+        ],
+    }
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json", encoding="utf-8") as jf:
+        os.chmod(jf.name, 0o600)
+        json.dump(payload, jf, ensure_ascii=False)
+        json_path = jf.name
+    cfg_path = _write_curl_config(api_key, json_body=True)
+    try:
+        cmd = [
+            "curl", "-K", cfg_path,
+            "-X", "POST", CHAT_URL,
+            "-d", f"@{json_path}",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            log("paragraph split: timeout")
+            return text
+    finally:
+        os.unlink(json_path)
+        os.unlink(cfg_path)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout).strip()[-500:]
+        log(f"paragraph split failed rc={result.returncode}: {tail}")
+        return text
+    try:
+        resp = json.loads(result.stdout)
+        content = resp["choices"][0]["message"]["content"].strip()
+    except (json.JSONDecodeError, KeyError, IndexError) as exc:
+        log(f"paragraph split parse failed: {exc}")
+        return text
+    return content or text
+
+
+def materialize_processed(raw_txt: Path, processed_txt: Path, api_key: str | None) -> None:
+    """Produce the final, paragraph-broken text from a raw transcript.
+
+    Short memos (single thought) are copied through verbatim. Longer ones go
+    through the chat model for paragraph breaks. The result is cached so
+    later runs are free.
+    """
+    text = raw_txt.read_text().strip()
+    if (
+        api_key
+        and not SKIP_POSTPROCESS
+        and len(text) >= PARAGRAPH_MIN_CHARS
+        and "\n\n" not in text  # already paragraphed (re-runs, manual edits)
+    ):
+        text = split_paragraphs(text, api_key)
+        log(f"paragraph split: {raw_txt.name} ({len(text)} chars)")
+    processed_txt.parent.mkdir(parents=True, exist_ok=True)
+    processed_txt.write_text(text.strip() + "\n")
 
 
 MONTH_NAMES = [
@@ -228,21 +352,27 @@ def main() -> int:
     SRC_DIR.mkdir(parents=True, exist_ok=True)
     MEMOS_DIR.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     api_key = get_api_key()
-    log(f"backend: {'openai-' + API_MODEL if api_key else 'local-' + LOCAL_MODEL}")
+    vocab_prompt = load_vocabulary()
+    log(f"backend: {'openai-' + API_MODEL if api_key else 'local-' + LOCAL_MODEL}"
+        + (f" vocab={len(vocab_prompt)}c" if vocab_prompt else " vocab=none"))
 
     mp3s = sorted(SRC_DIR.rglob("*.mp3"))
     new_count = 0
     for mp3 in mp3s:
-        cached = CACHE_DIR / (mp3.stem + ".txt")
-        if cached.exists() and cached.stat().st_size > 0:
-            continue
-        if transcribe_one(mp3, cached, api_key):
+        raw = CACHE_DIR / (mp3.stem + ".txt")
+        processed = PROCESSED_DIR / (mp3.stem + ".txt")
+        if not (raw.exists() and raw.stat().st_size > 0):
+            if not transcribe_one(mp3, raw, api_key, vocab_prompt):
+                continue
             new_count += 1
+        if not (processed.exists() and processed.stat().st_size > 0):
+            materialize_processed(raw, processed, api_key)
 
     by_month: dict[tuple[int, int], list[dict]] = defaultdict(list)
-    for txt in CACHE_DIR.glob("*.txt"):
+    for txt in PROCESSED_DIR.glob("*.txt"):
         info = parse_name(txt.stem)
         if not info:
             continue
