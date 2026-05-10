@@ -20,6 +20,10 @@ API key resolution (in order):
 Idempotent. Safe to run on a schedule or after every sync.
 """
 
+# launchd-spawned scripts use /usr/bin/python3 (Apple's, currently 3.9), which
+# doesn't support PEP 604 `X | Y` annotations. This makes annotations lazy.
+from __future__ import annotations
+
 import os
 import re
 import shutil
@@ -31,11 +35,34 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-SRC_DIR = HOME / "Sony" / "Files"
-MEMOS_DIR = HOME / "Sony" / "Memos"
-CACHE_DIR = HOME / "Sony" / ".cache" / "transcripts"
 LOG_FILE = HOME / "Library" / "Logs" / "transcribe-memos.log"
 KEY_FILE = HOME / ".config" / "openai" / "api_key"
+CONFIG_FILE = HOME / ".config" / "voicememo" / "config.sh"
+
+
+def _load_shared_config() -> dict:
+    """Parse the shared sh-style config (KEY="value" lines, $HOME / ~ expansion)."""
+    config = {}
+    if not CONFIG_FILE.exists():
+        return config
+    for raw in CONFIG_FILE.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        v = v.strip()
+        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+            v = v[1:-1]
+        config[k.strip()] = os.path.expandvars(os.path.expanduser(v))
+    return config
+
+
+_cfg = _load_shared_config()
+# SONY_BASE is the only path shared with sync-ic-recorder.sh. Subdirs derive.
+BASE_DIR = Path(_cfg.get("SONY_BASE", str(HOME / "Documents" / "Sony")))
+SRC_DIR = BASE_DIR / "Files"
+MEMOS_DIR = BASE_DIR / "Memos"
+CACHE_DIR = BASE_DIR / ".cache" / "transcripts"
 
 API_URL = "https://api.openai.com/v1/audio/transcriptions"
 API_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")

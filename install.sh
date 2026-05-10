@@ -38,13 +38,22 @@ if ! brew list --formula 2>/dev/null | grep -qx ffmpeg; then
   brew install ffmpeg
 fi
 
-# 2. Working directories
+# 2. Shared config — seeded from the example template on first install.
+mkdir -p "$HOME/.config/voicememo" "$HOME/.config/openai"
+if [ ! -f "$HOME/.config/voicememo/config.sh" ]; then
+  cp "$REPO_DIR/config.sh.example" "$HOME/.config/voicememo/config.sh"
+  echo "==> seeded $HOME/.config/voicememo/config.sh"
+fi
+. "$HOME/.config/voicememo/config.sh"
+SONY_BASE="${SONY_BASE:-$HOME/Documents/Sony}"
+echo "==> SONY_BASE=$SONY_BASE"
+
+# 3. Working directories (derived from SONY_BASE)
 mkdir -p \
   "$HOME/bin" \
-  "$HOME/Sony/Files" \
-  "$HOME/Sony/Memos" \
-  "$HOME/Sony/.cache/transcripts" \
-  "$HOME/.config/openai" \
+  "$SONY_BASE/Files" \
+  "$SONY_BASE/Memos" \
+  "$SONY_BASE/.cache/transcripts" \
   "$HOME/Library/LaunchAgents" \
   "$HOME/Library/Logs"
 

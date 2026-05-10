@@ -57,16 +57,31 @@ Tweak via env vars:
 ## File layout
 
 ```
-~/Sony/Files/                  copied mp3s
-~/Sony/Memos/YYYY-MM-DD.md     daily merged transcripts
-~/Sony/.cache/transcripts/     per-mp3 raw transcripts (idempotency cache)
-~/.config/openai/api_key       OpenAI key, chmod 600 (gitignored, never in repo)
-~/bin/sync-ic-recorder.sh      symlink → repo
-~/bin/transcribe-memos.py      symlink → repo
+$SONY_BASE/Files/                  copied mp3s          (default: ~/Documents/Sony/Files/)
+$SONY_BASE/Memos/<Month YYYY>.md   monthly transcripts   (default: ~/Documents/Sony/Memos/)
+$SONY_BASE/.cache/transcripts/     per-mp3 raw transcripts (idempotency cache)
+~/.config/voicememo/config.sh      shared config (sourced by sync.sh + transcribe.py)
+~/.config/openai/api_key           OpenAI key, chmod 600 (gitignored, never in repo)
+~/bin/sync-ic-recorder.sh          symlink → repo
+~/bin/transcribe-memos.py          symlink → repo
 ~/Library/LaunchAgents/com.maxua.sync-ic-recorder.plist
 ~/Library/Logs/sync-ic-recorder.{log,out.log,err.log}
 ~/Library/Logs/transcribe-memos.log
 ```
+
+## Config file
+
+Both scripts read `~/.config/voicememo/config.sh` for the shared `SONY_BASE`
+path. Seeded by `install.sh` from `config.sh.example`. To relocate
+recordings, edit one line — both scripts pick it up on the next run.
+
+```bash
+SONY_BASE="$HOME/Documents/Sony"   # or ~/Sony, or wherever
+```
+
+`~/Documents` puts recordings + transcripts under iCloud (free off-machine
+backup) but requires Full Disk Access for `/bin/bash` so launchd-spawned
+rsync can write into the TCC-protected folder. Plain `~/Sony` avoids both.
 
 ## Sony filename convention
 

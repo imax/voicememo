@@ -1,0 +1,11 @@
+# Voice memo pipeline config — single source of truth for shared paths.
+#
+# Both sync-ic-recorder.sh (bash) and transcribe.py (Python) read this file.
+# install.sh copies this to ~/.config/voicememo/config.sh on first install.
+# Edit the live copy at ~/.config/voicememo/config.sh — not this template.
+
+# Canonical recordings root. Subdirs derived: $SONY_BASE/Files (mp3s),
+# $SONY_BASE/Memos (transcripts), $SONY_BASE/.cache/transcripts (raw cache).
+# ~/Documents is iCloud-synced if you have Desktop & Documents Sync on,
+# which gives you a free off-machine backup of recordings + transcripts.
+SONY_BASE="$HOME/Documents/Sony"

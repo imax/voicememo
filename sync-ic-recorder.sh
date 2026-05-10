@@ -1,16 +1,23 @@
 #!/bin/bash
-# Sync new recordings from Sony IC Recorder to ~/Sony/Files/, then kick off
-# transcription. Triggered by launchd (StartOnMount) on every volume mount;
-# exits silently if the IC RECORDER isn't the volume that just appeared.
+# Sync new recordings from Sony IC Recorder to $SONY_BASE/Files/, then kick
+# off transcription. Triggered by launchd (StartOnMount) on every volume
+# mount; exits silently if the IC RECORDER isn't the volume that just
+# appeared.
 #
 # Canonical source lives in <repo>/voicememo/. install.sh symlinks
 # ~/bin/sync-ic-recorder.sh to this file.
 
 set -u
 
+# Shared config — see voicememo/config.sh.example. Both this script and
+# transcribe.py read SONY_BASE from here so the paths can't drift.
+CONFIG_FILE="$HOME/.config/voicememo/config.sh"
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+SONY_BASE="${SONY_BASE:-$HOME/Documents/Sony}"
+
 VOLUME="/Volumes/IC RECORDER"
 SRC="$VOLUME/REC_FILE/FOLDER01/"
-DEST="$HOME/Sony/Files/"
+DEST="$SONY_BASE/Files/"
 LOG="$HOME/Library/Logs/sync-ic-recorder.log"
 TRANSCRIBE="$HOME/bin/transcribe-memos.py"
 
