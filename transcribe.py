@@ -5,19 +5,17 @@ Transcribe Sony IC Recorder voice memos with OpenAI's audio API.
 - Reads mp3s from ~/Sony/Files/.
 - Caches per-file transcripts under ~/Sony/.cache/transcripts/<basename>.txt
   so re-runs only transcribe new files.
-- Merges per-day transcripts into ~/Sony/Memos/YYYY-MM-DD.md, sorted by time.
+- Merges per-month transcripts into ~/Sony/Memos/<Month YYYY>.md.
 
 Sony filename convention: YYMMDD_HHMM[_NN].mp3  (NN = split-segment index).
 
-Backend: OpenAI /v1/audio/transcriptions with `gpt-4o-transcribe` model
-(highest quality for non-English as of 2026). Falls through to local
-openai-whisper CLI if no API key is configured.
+Backend: OpenAI /v1/audio/transcriptions with `gpt-4o-transcribe`. Requires
+an API key. Idempotent: a run with no internet/key just exits; the next run
+picks up everything that wasn't cached.
 
 API key resolution (in order):
   1. $OPENAI_API_KEY environment variable
   2. ~/.config/openai/api_key file (chmod 600)
-
-Idempotent. Safe to run on a schedule or after every sync.
 """
 
 # launchd-spawned scripts use /usr/bin/python3 (Apple's, currently 3.9), which
@@ -27,7 +25,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,9 +69,7 @@ API_URL = "https://api.openai.com/v1/audio/transcriptions"
 CHAT_URL = "https://api.openai.com/v1/chat/completions"
 API_MODEL = os.environ.get("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
 POSTPROCESS_MODEL = os.environ.get("OPENAI_POSTPROCESS_MODEL", "gpt-4o-mini")
-LANG = os.environ.get("WHISPER_LANG", "uk")
-LOCAL_WHISPER_BIN = shutil.which("whisper")
-LOCAL_MODEL = os.environ.get("WHISPER_MODEL", "large-v3")
+LANG = os.environ.get("VOICEMEMO_LANG", "uk")
 
 # Texts shorter than this (chars) skip the paragraph-split post-process —
 # they're already one thought, no point spending an API call.
@@ -190,42 +185,6 @@ def transcribe_via_openai(mp3: Path, out_txt: Path, api_key: str, vocab_prompt: 
     return True
 
 
-def transcribe_via_local(mp3: Path, out_txt: Path) -> bool:
-    if not LOCAL_WHISPER_BIN:
-        log("no local whisper binary on PATH (brew install openai-whisper)")
-        return False
-    out_txt.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory() as tmp:
-        cmd = [
-            LOCAL_WHISPER_BIN, str(mp3),
-            "--language", LANG,
-            "--model", LOCAL_MODEL,
-            "--output_dir", tmp,
-            "--output_format", "txt",
-            "--verbose", "False",
-        ]
-        log(f"local transcribe: {mp3.name}")
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        except subprocess.TimeoutExpired:
-            log(f"timeout: {mp3.name}")
-            return False
-        if result.returncode != 0:
-            tail = (result.stderr or result.stdout).strip()[-500:]
-            log(f"local whisper failed rc={result.returncode}: {tail}")
-            return False
-        produced = Path(tmp) / (mp3.stem + ".txt")
-        if not produced.exists():
-            log(f"local whisper produced no .txt for {mp3.name}")
-            return False
-        shutil.move(str(produced), str(out_txt))
-    return True
-
-
-def transcribe_one(mp3: Path, out_txt: Path, api_key: str | None, vocab_prompt: str) -> bool:
-    if api_key:
-        return transcribe_via_openai(mp3, out_txt, api_key, vocab_prompt)
-    return transcribe_via_local(mp3, out_txt)
 
 
 def split_paragraphs(text: str, api_key: str) -> str:
@@ -354,18 +313,27 @@ def main() -> int:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
+    started_at = datetime.now()
     api_key = get_api_key()
+    if not api_key:
+        log("ERROR: no OpenAI key — paste one into ~/.config/openai/api_key "
+            "or export OPENAI_API_KEY. Idempotent — re-run after fixing.")
+        return 1
     vocab_prompt = load_vocabulary()
-    log(f"backend: {'openai-' + API_MODEL if api_key else 'local-' + LOCAL_MODEL}"
-        + (f" vocab={len(vocab_prompt)}c" if vocab_prompt else " vocab=none"))
+    vocab_tag = f"vocab={len(vocab_prompt)}c" if vocab_prompt else "vocab=none"
+    log(f"start pid={os.getpid()} backend=openai-{API_MODEL} {vocab_tag}")
 
     mp3s = sorted(SRC_DIR.rglob("*.mp3"))
+    pending = [m for m in mp3s
+               if not ((CACHE_DIR / (m.stem + ".txt")).exists()
+                       and (CACHE_DIR / (m.stem + ".txt")).stat().st_size > 0)]
+    log(f"queue: {len(pending)} new of {len(mp3s)} mp3s")
     new_count = 0
     for mp3 in mp3s:
         raw = CACHE_DIR / (mp3.stem + ".txt")
         processed = PROCESSED_DIR / (mp3.stem + ".txt")
         if not (raw.exists() and raw.stat().st_size > 0):
-            if not transcribe_one(mp3, raw, api_key, vocab_prompt):
+            if not transcribe_via_openai(mp3, raw, api_key, vocab_prompt):
                 continue
             new_count += 1
         if not (processed.exists() and processed.stat().st_size > 0):
@@ -394,7 +362,8 @@ def main() -> int:
         merge_month(year, month, entries)
         months_written.append(f"{MONTH_NAMES[month]} {year}")
 
-    log(f"done: {new_count} new transcript(s), {len(months_written)} month file(s)")
+    elapsed = (datetime.now() - started_at).total_seconds()
+    log(f"done in {elapsed:.0f}s: {new_count} new transcript(s), {len(months_written)} month file(s)")
 
     if new_count > 0:
         latest = sorted(months_written)[-2:]

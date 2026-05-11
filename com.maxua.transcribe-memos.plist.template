@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.maxua.transcribe-memos</string>
+
+    <!-- Routed through /bin/bash (not python3 directly) so the Full Disk
+         Access grant on /bin/bash carries through: TCC checks the launchd-
+         tracked binary, so launching python3 directly leaves SRC_DIR
+         unreadable when it lives under ~/Documents. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>exec __HOME__/bin/transcribe-memos.py</string>
+    </array>
+
+    <!-- On-demand only: kicked by sync-ic-recorder.sh via launchctl kickstart.
+         Loaded as its own LaunchAgent so it survives the sync script exiting
+         (a backgrounded `nohup &` child was being killed when launchd reaped
+         the sync job's process group). -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/transcribe-memos.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/transcribe-memos.err.log</string>
+</dict>
+</plist>

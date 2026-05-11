@@ -20,6 +20,7 @@ SRC="$VOLUME/REC_FILE/FOLDER01/"
 DEST="$SONY_BASE/Files/"
 LOG="$HOME/Library/Logs/sync-ic-recorder.log"
 TRANSCRIBE="$HOME/bin/transcribe-memos.py"
+TRANSCRIBE_LABEL="com.maxua.transcribe-memos"
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
 
@@ -49,11 +50,17 @@ elif [ "$RC" -ne 0 ]; then
   /usr/bin/osascript -e "display notification \"rsync exit $RC — see log\" with title \"IC Recorder sync failed\""
 fi
 
-# Kick off transcription in the background. It's idempotent (skips already-
-# transcribed files), so we run it even when NEW=0 — cheap, and recovers if
-# a previous run was interrupted.
-if [ -x "$TRANSCRIBE" ]; then
-  log "kicking off transcription"
+# Kick off transcription via its own LaunchAgent. Backgrounded `nohup &`
+# children of a launchd-spawned script get reaped when the job's process
+# group exits — silent death, no log line. Owning a separate LaunchAgent
+# means launchd tracks the transcribe process directly. `-k` kills any
+# stuck instance and starts fresh (safe: cache makes restart idempotent).
+# Falls back to direct exec if the agent isn't loaded yet (pre-update install).
+log "kicking off transcription"
+if launchctl kickstart -k "gui/$(id -u)/$TRANSCRIBE_LABEL" >> "$LOG" 2>&1; then
+  log "kickstart ok ($TRANSCRIBE_LABEL)"
+elif [ -x "$TRANSCRIBE" ]; then
+  log "kickstart failed; running directly (rerun install.sh to fix)"
   nohup "$TRANSCRIBE" >> "$LOG" 2>&1 &
   log "transcription pid=$!"
 else

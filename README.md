@@ -7,7 +7,9 @@ Auto-sync + transcription pipeline for a Sony IC Recorder on macOS.
 1. You plug in the recorder (mounts as `/Volumes/IC RECORDER`).
 2. macOS launchd fires `sync-ic-recorder.sh` on the mount event.
 3. The script `rsync`s new `.mp3`s from `REC_FILE/FOLDER01/` to `~/Sony/Files/`.
-4. It then kicks off `transcribe.py` in the background.
+4. It then kicks off `transcribe.py` via its own LaunchAgent (so the
+   transcribe process survives the sync script exiting — a plain
+   backgrounded child gets reaped with the sync job's process group).
 5. Each new mp3 is transcribed once (via OpenAI's `gpt-4o-transcribe`, biased
    with your personal vocabulary) and cached under
    `~/Sony/.cache/transcripts/<basename>.txt`.
@@ -41,23 +43,19 @@ Then two manual steps the installer can't do:
 
 ## Backend
 
-Default: **OpenAI `gpt-4o-transcribe`** via `/v1/audio/transcriptions`. Best
-quality for non-English (Ukrainian works very well). ~$0.006/min audio.
+**OpenAI `gpt-4o-transcribe`** via `/v1/audio/transcriptions`. Best quality
+for non-English (Ukrainian works very well). ~$0.006/min audio.
 
-Fallback (no API key): **local `openai-whisper`** with `large-v3`. Same model
-family as cloud whisper-1, slightly older than gpt-4o-transcribe but still
-strong on Ukrainian. Free, offline, slower.
-
-The script picks based on whether a key is present; switch by emptying or
-filling `~/.config/openai/api_key`.
+No local/offline fallback. If the API is unreachable or the key is missing,
+the run logs an error and exits — the next kick picks up everything that
+wasn't cached, so a transient outage self-heals on the next sync.
 
 Tweak via env vars:
-- `OPENAI_TRANSCRIBE_MODEL` — defaults to `gpt-4o-transcribe`. Try `whisper-1`
-  for cheaper, `gpt-4o-mini-transcribe` for cheaper still.
+- `OPENAI_TRANSCRIBE_MODEL` — defaults to `gpt-4o-transcribe`. Try
+  `gpt-4o-mini-transcribe` for cheaper.
 - `OPENAI_POSTPROCESS_MODEL` — chat model used for paragraph splitting.
   Defaults to `gpt-4o-mini` (~$0.0001 per long memo).
-- `WHISPER_LANG` — defaults to `uk`.
-- `WHISPER_MODEL` — local-fallback model, defaults to `large-v3`.
+- `VOICEMEMO_LANG` — input language hint, defaults to `uk`.
 - `VOICEMEMO_VOCAB_FILE` — override path to vocabulary.md.
 - `VOICEMEMO_PARAGRAPH_MIN_CHARS` — texts shorter than this skip the
   paragraph-split step. Default `400`.
@@ -110,8 +108,9 @@ $SONY_BASE/.cache/processed/       paragraph-split versions; what merge reads
 ~/bin/sync-ic-recorder.sh          symlink → repo
 ~/bin/transcribe-memos.py          symlink → repo
 ~/Library/LaunchAgents/com.maxua.sync-ic-recorder.plist
+~/Library/LaunchAgents/com.maxua.transcribe-memos.plist
 ~/Library/Logs/sync-ic-recorder.{log,out.log,err.log}
-~/Library/Logs/transcribe-memos.log
+~/Library/Logs/transcribe-memos.{log,out.log,err.log}
 ```
 
 ## Config file
@@ -167,12 +166,18 @@ rm -rf ~/Sony/.cache/transcripts/* ~/Sony/.cache/processed/* ~/Sony/Memos/*.md
 rm -rf ~/Sony/.cache/processed/*
 ~/bin/transcribe-memos.py
 
-# Reload the LaunchAgent after editing the plist
-PLIST=~/Library/LaunchAgents/com.maxua.sync-ic-recorder.plist
-launchctl unload "$PLIST" && launchctl load "$PLIST"
+# Reload both LaunchAgents after editing a plist (easiest: just rerun install)
+./install.sh
 
 # Tail logs while testing
 tail -f ~/Library/Logs/sync-ic-recorder.log ~/Library/Logs/transcribe-memos.log
+
+# If transcription seems stuck, check launchd's view + crash logs
+launchctl print "gui/$(id -u)/com.maxua.transcribe-memos" | head -40
+tail -20 ~/Library/Logs/transcribe-memos.err.log
+
+# Force-kick transcription (kills any running instance and restarts)
+launchctl kickstart -k "gui/$(id -u)/com.maxua.transcribe-memos"
 ```
 
 ## macOS gotchas
