@@ -29,7 +29,7 @@ add displaces a genuinely useful one. Keep it tight.
 
 After editing, future recordings pick up the new vocab automatically. To
 re-transcribe existing memos with the new vocab, delete their cached
-transcript: `rm ~/Documents/Sony/.cache/transcripts/<basename>.txt`.
+transcript: `rm ~/Library/Caches/voicememo/transcripts/<basename>.txt`.
 
 ---
 

@@ -40,15 +40,20 @@ if [ ! -f "$HOME/.config/voicememo/vocabulary.md" ]; then
 fi
 . "$HOME/.config/voicememo/config.sh"
 SONY_BASE="${SONY_BASE:-$HOME/Documents/Sony}"
+CACHE_BASE="${CACHE_BASE:-$HOME/Library/Caches/voicememo}"
 echo "==> SONY_BASE=$SONY_BASE"
+echo "==> CACHE_BASE=$CACHE_BASE"
 
-# 3. Working directories (derived from SONY_BASE)
+# 3. Working directories. SONY_BASE holds user-facing artifacts (mp3s + monthly
+#    notes); CACHE_BASE holds derived per-mp3 transcripts. They're split so
+#    SONY_BASE can sit under ~/Documents (iCloud-synced) without iCloud's
+#    bird daemon locking the cache mid-batch — see README "macOS gotchas".
 mkdir -p \
   "$HOME/bin" \
   "$SONY_BASE/Files" \
   "$SONY_BASE/Memos" \
-  "$SONY_BASE/.cache/transcripts" \
-  "$SONY_BASE/.cache/processed" \
+  "$CACHE_BASE/transcripts" \
+  "$CACHE_BASE/processed" \
   "$HOME/Library/LaunchAgents" \
   "$HOME/Library/Logs"
 

@@ -2,10 +2,11 @@
 """
 Transcribe Sony IC Recorder voice memos with OpenAI's audio API.
 
-- Reads mp3s from ~/Sony/Files/.
-- Caches per-file transcripts under ~/Sony/.cache/transcripts/<basename>.txt
+- Reads mp3s from $SONY_BASE/Files/ (default ~/Documents/Sony/Files/).
+- Caches per-file transcripts under
+  $CACHE_BASE/transcripts/<basename>.txt (default ~/Library/Caches/voicememo/)
   so re-runs only transcribe new files.
-- Merges per-month transcripts into ~/Sony/Memos/<Month YYYY>.md.
+- Merges per-month transcripts into $SONY_BASE/Memos/<Month YYYY>.md.
 
 Sony filename convention: YYMMDD_HHMM[_NN].mp3  (NN = split-segment index).
 
@@ -22,12 +23,14 @@ API key resolution (in order):
 # doesn't support PEP 604 `X | Y` annotations. This makes annotations lazy.
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -62,8 +65,13 @@ _cfg = _load_shared_config()
 BASE_DIR = Path(_cfg.get("SONY_BASE", str(HOME / "Documents" / "Sony")))
 SRC_DIR = BASE_DIR / "Files"
 MEMOS_DIR = BASE_DIR / "Memos"
-CACHE_DIR = BASE_DIR / ".cache" / "transcripts"
-PROCESSED_DIR = BASE_DIR / ".cache" / "processed"
+# Cache lives outside BASE_DIR by default so iCloud (which manages ~/Documents)
+# doesn't lock these derived files mid-run. The .txt files here are
+# regeneratable from the mp3s, so no reason to sync them anywhere. Override
+# with CACHE_BASE in ~/.config/voicememo/config.sh if you want.
+CACHE_BASE = Path(_cfg.get("CACHE_BASE", str(HOME / "Library" / "Caches" / "voicememo")))
+CACHE_DIR = CACHE_BASE / "transcripts"
+PROCESSED_DIR = CACHE_BASE / "processed"
 
 API_URL = "https://api.openai.com/v1/audio/transcriptions"
 CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -83,6 +91,29 @@ def log(msg: str) -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     with LOG_FILE.open("a") as f:
         f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n")
+
+
+def read_text_robust(path: Path, attempts: int = 12, delay: float = 1.0) -> str:
+    """Read a text file, retrying on transient OS-level lock contention.
+
+    ~/Documents lives on iCloud Drive, and `bird` (the iCloud daemon)
+    holds an exclusive advisory lock while it inspects a file's sync
+    state. Reads in that window fail with OSError(EDEADLK) — "Resource
+    deadlock avoided". Observed in practice: the lock is mostly held for
+    <1s, but a re-scan of the .cache subdir during our glob loop can
+    extend it past 5s. A generous linear backoff (~78s total) rides it
+    out instead of killing the whole month-rebuild.
+    """
+    for i in range(attempts):
+        try:
+            return path.read_text()
+        except OSError as e:
+            if e.errno != errno.EDEADLK or i == attempts - 1:
+                raise
+            log(f"read retry {i+1}/{attempts} on {path.name}: {e}")
+            time.sleep(delay * (i + 1))
+    # unreachable: last iteration either returns or re-raises
+    return ""
 
 
 def get_api_key() -> str | None:
@@ -344,7 +375,7 @@ def main() -> int:
         info = parse_name(txt.stem)
         if not info:
             continue
-        text = txt.read_text().strip()
+        text = read_text_robust(txt).strip()
         if not text:
             continue
         year, month = info["sort_key"][0], info["sort_key"][1]

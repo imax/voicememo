@@ -12,9 +12,10 @@ Auto-sync + transcription pipeline for a Sony IC Recorder on macOS.
    backgrounded child gets reaped with the sync job's process group).
 5. Each new mp3 is transcribed once (via OpenAI's `gpt-4o-transcribe`, biased
    with your personal vocabulary) and cached under
-   `~/Sony/.cache/transcripts/<basename>.txt`.
+   `~/Library/Caches/voicememo/transcripts/<basename>.txt`.
 6. Long transcripts get a paragraph-split pass via `gpt-4o-mini` and land in
-   `~/Sony/.cache/processed/<basename>.txt` (short ones are copied through).
+   `~/Library/Caches/voicememo/processed/<basename>.txt` (short ones are copied
+   through).
 7. All processed transcripts for a given month get merged into
    `~/Sony/Memos/<Month YYYY>.md`, reverse-chronological.
 
@@ -81,7 +82,7 @@ term displaces a useful one (the prompt has a ~200-word effective ceiling).
 After editing, future recordings pick up the new vocab automatically. To
 re-apply vocab to existing memos, delete their raw transcript:
 ```bash
-rm ~/Documents/Sony/.cache/transcripts/<basename>.txt
+rm ~/Library/Caches/voicememo/transcripts/<basename>.txt
 ~/bin/transcribe-memos.py
 ```
 
@@ -91,17 +92,19 @@ Single-blob transcripts of long memos are hard to skim. After transcription,
 texts longer than `VOICEMEMO_PARAGRAPH_MIN_CHARS` (default 400) get a second
 pass through `gpt-4o-mini` with a strict prompt: insert paragraph breaks at
 topic shifts, change zero words. The result lands in
-`~/Sony/.cache/processed/`, separate from the raw cache so you can blow away
-processed/ and re-paragraph everything (free, no transcribe API calls) after
-tweaking the prompt.
+`~/Library/Caches/voicememo/processed/`, separate from the raw cache so you
+can blow away `processed/` and re-paragraph everything (free, no transcribe
+API calls) after tweaking the prompt.
 
 ## File layout
 
 ```
 $SONY_BASE/Files/                  copied mp3s          (default: ~/Documents/Sony/Files/)
 $SONY_BASE/Memos/<Month YYYY>.md   monthly transcripts   (default: ~/Documents/Sony/Memos/)
-$SONY_BASE/.cache/transcripts/     per-mp3 raw transcripts (idempotency cache)
-$SONY_BASE/.cache/processed/       paragraph-split versions; what merge reads
+$CACHE_BASE/transcripts/           per-mp3 raw transcripts (idempotency cache;
+                                     default: ~/Library/Caches/voicememo/transcripts/)
+$CACHE_BASE/processed/             paragraph-split versions; what merge reads
+                                     (default: ~/Library/Caches/voicememo/processed/)
 ~/.config/voicememo/config.sh      shared config (sourced by sync.sh + transcribe.py)
 ~/.config/voicememo/vocabulary.md  vocab hint passed to the transcription API
 ~/.config/openai/api_key           OpenAI key, chmod 600 (gitignored, never in repo)
@@ -112,6 +115,9 @@ $SONY_BASE/.cache/processed/       paragraph-split versions; what merge reads
 ~/Library/Logs/sync-ic-recorder.{log,out.log,err.log}
 ~/Library/Logs/transcribe-memos.{log,out.log,err.log}
 ```
+
+`CACHE_BASE` is split from `SONY_BASE` on purpose — see the iCloud lock note
+under [macOS gotchas](#macos-gotchas).
 
 ## Config file
 
@@ -159,11 +165,11 @@ with the same paths) or add `Memos` to the vault's `.gitignore`.
 ~/bin/transcribe-memos.py
 
 # Re-transcribe everything from scratch (will re-spend on cloud)
-rm -rf ~/Sony/.cache/transcripts/* ~/Sony/.cache/processed/* ~/Sony/Memos/*.md
+rm -rf ~/Library/Caches/voicememo/transcripts/* ~/Library/Caches/voicememo/processed/* ~/Documents/Sony/Memos/*.md
 ~/bin/transcribe-memos.py
 
 # Re-paragraph everything (cheap — only the post-process LLM, no transcribe)
-rm -rf ~/Sony/.cache/processed/*
+rm -rf ~/Library/Caches/voicememo/processed/*
 ~/bin/transcribe-memos.py
 
 # Reload both LaunchAgents after editing a plist (easiest: just rerun install)
@@ -182,11 +188,23 @@ launchctl kickstart -k "gui/$(id -u)/com.maxua.transcribe-memos"
 
 ## macOS gotchas
 
-- `~/Documents` and `~/Desktop` are TCC-protected AND iCloud-synced when
-  "Desktop & Documents Folders" is on. Don't put `Sony/` there — recordings
-  would silently upload to iCloud and bash would hit "Operation not
-  permitted" without Full Disk Access. We use `~/Sony/` precisely to dodge
-  both problems.
+- `~/Documents` is TCC-protected AND iCloud-synced when "Desktop & Documents
+  Folders" sync is on. That's fine for the canonical `~/Documents/Sony/`
+  layout (you get free off-machine backup of recordings + monthly notes),
+  but two things follow from it:
+  - **Full Disk Access on `/bin/bash`** is required so launchd-spawned bash
+    can `rsync` into the TCC-protected folder. The transcribe LaunchAgent
+    is routed through `/bin/bash` for the same reason. See [install](#install).
+  - **The cache must live outside iCloud.** `~/Documents/Sony/.cache/` was
+    the original location, but iCloud's `bird` daemon holds an exclusive
+    advisory lock while inspecting each file's sync state. Mid-batch reads
+    of the per-mp3 txt cache would fail with `OSError: [Errno 11] Resource
+    deadlock avoided`, crashing the month-rebuild. Since 2026-05, the cache
+    defaults to `~/Library/Caches/voicememo/` (overridable via `CACHE_BASE`
+    in `config.sh`). The mp3s and `.md` monthly notes still live under
+    `SONY_BASE` and still sync to iCloud — only the derived txt cache moved.
+    `transcribe.py` also retries on EDEADLK as a belt-and-braces guard for
+    anyone who points `CACHE_BASE` back into an iCloud-managed path.
 - `/Volumes/<removable>` is TCC-protected. Without FDA on `/bin/bash`,
   launchd-spawned scripts will see "Operation not permitted" trying to read
   the recorder.

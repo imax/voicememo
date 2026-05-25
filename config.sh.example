@@ -5,7 +5,13 @@
 # Edit the live copy at ~/.config/voicememo/config.sh — not this template.
 
 # Canonical recordings root. Subdirs derived: $SONY_BASE/Files (mp3s),
-# $SONY_BASE/Memos (transcripts), $SONY_BASE/.cache/transcripts (raw cache).
-# ~/Documents is iCloud-synced if you have Desktop & Documents Sync on,
-# which gives you a free off-machine backup of recordings + transcripts.
+# $SONY_BASE/Memos (monthly .md transcripts). ~/Documents is iCloud-synced
+# if you have Desktop & Documents Sync on, which gives you a free
+# off-machine backup of recordings + transcripts.
 SONY_BASE="$HOME/Documents/Sony"
+
+# Per-mp3 cache (transcripts/ + processed/). Lives outside SONY_BASE by
+# default because iCloud's bird daemon takes exclusive locks while syncing
+# small files, which crashed the month-rebuild loop. Override only if you
+# know your cache target is not iCloud-managed. See README "macOS gotchas".
+# CACHE_BASE="$HOME/Library/Caches/voicememo"
