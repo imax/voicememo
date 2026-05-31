@@ -269,6 +269,11 @@ each test isolates its output into a temp dir, so it never touches the vault.
 pytest test_transcribe.py   # also works if pytest is installed
 ```
 
+**Keep them current.** When you change the merge/append/manifest logic in
+`transcribe.py`, add or update a test in the same change and run the suite
+before committing — it's fast and needs no setup. The month files are
+user-edited data, so a regression here silently corrupts notes.
+
 ## macOS gotchas
 
 - `~/Documents` is TCC-protected AND iCloud-synced when "Desktop & Documents
