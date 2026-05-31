@@ -86,6 +86,33 @@ SKIP_POSTPROCESS = bool(os.environ.get("VOICEMEMO_SKIP_POSTPROCESS"))
 
 NAME_RE = re.compile(r"^(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(?:_(\d+))?$")
 
+# Voice-command triggers at the start of a paragraph.
+# "хайлайт ідея X" -> ==Ідея X== in the month file.
+# "туду/задача/марк/запиши X" -> regular paragraph in month, plus an entry in Todos.md.
+# \b stops "марк" from eating "Маркетинг"; case-insensitive matches "Хайлайт", "ХАЙЛАЙТ", etc.
+# Separator class is "+" so "Хайлайт" alone (no body) falls through as a normal paragraph.
+TRIGGER_RE = re.compile(
+    r"^\s*(?P<word>хайлайт|туду|задача|марк|запиши)\b[\s:.\-,–—]+",
+    re.IGNORECASE,
+)
+HIGHLIGHT_WORDS = {"хайлайт"}
+TODO_WORDS = {"туду", "задача", "марк", "запиши"}
+
+
+def classify_paragraph(para: str) -> tuple[str, str]:
+    """Return (kind, body). kind ∈ {'highlight', 'todo', 'normal'}; body has the trigger stripped."""
+    m = TRIGGER_RE.match(para)
+    if not m:
+        return "normal", para
+    body = para[m.end():].lstrip()
+    if not body:
+        return "normal", para
+    body = body[0].upper() + body[1:]
+    word = m.group("word").lower()
+    if word in HIGHLIGHT_WORDS:
+        return "highlight", body
+    return "todo", body
+
 
 def log(msg: str) -> None:
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -311,7 +338,27 @@ def format_uk_date(iso_date: str) -> str:
     return f"{int(dd)} {UK_MONTHS_GEN[int(mm)]}"
 
 
-def merge_month(year: int, month: int, entries: list) -> Path:
+def render_entry_text(text: str, date: str, time: str, todos: list) -> str:
+    """Apply paragraph-level triggers. Highlight paras get wrapped in ==..==; todo
+    paras stay as normal text but also append a record to `todos` for Todos.md."""
+    paragraphs = text.split("\n\n")
+    rendered = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        kind, body = classify_paragraph(para)
+        if kind == "highlight":
+            rendered.append(f"=={body}==")
+        elif kind == "todo":
+            rendered.append(body)
+            todos.append({"date": date, "time": time, "text": body})
+        else:
+            rendered.append(para)
+    return "\n\n".join(rendered)
+
+
+def merge_month(year: int, month: int, entries: list, todos: list) -> Path:
     # Filename "May 2026.md". No H1 — filename is the title.
     # Reverse-chronological: newest day on top, newest recording within a day on top.
     # Day header: ## 9 травня. Recording header: **HH:MM**.
@@ -332,9 +379,34 @@ def merge_month(year: int, month: int, entries: list) -> Path:
         suffix = f" (cont. {e['segment']})" if e["segment"] else ""
         lines.append(f"**{e['time']}{suffix}**")
         lines.append("")
-        lines.append(e["text"].strip())
+        lines.append(render_entry_text(e["text"], e["date"], e["time"], todos))
         lines.append("")
     out.write_text("\n".join(lines).lstrip("\n"))
+    return out
+
+
+def write_todos(todos: list) -> Path | None:
+    """Aggregate todos collected across all months into Memos/Todos.md."""
+    out = MEMOS_DIR / "Todos.md"
+    if not todos:
+        # Keep the file fresh: if everything's been edited away, leave an empty stub
+        # rather than a stale list from the previous run.
+        if out.exists():
+            out.write_text("# Todos\n\n_(порожньо)_\n")
+        return None
+    # Newest day first; newest entry within a day first.
+    todos = sorted(todos, key=lambda t: (t["date"], t["time"]), reverse=True)
+    lines = ["# Todos", ""]
+    current_date = None
+    for t in todos:
+        if t["date"] != current_date:
+            if current_date is not None:
+                lines.append("")
+            lines.append(f"## {format_uk_date(t['date'])} ({t['date']})")
+            lines.append("")
+            current_date = t["date"]
+        lines.append(f"- **{t['time']}** {t['text']}")
+    out.write_text("\n".join(lines) + "\n")
     return out
 
 
@@ -388,10 +460,14 @@ def main() -> int:
         })
 
     months_written = []
+    todos: list[dict] = []
     for (year, month), entries in by_month.items():
         entries.sort(key=lambda e: e["sort_key"])
-        merge_month(year, month, entries)
+        merge_month(year, month, entries, todos)
         months_written.append(f"{MONTH_NAMES[month]} {year}")
+    write_todos(todos)
+    if todos:
+        log(f"todos: {len(todos)} collected → Todos.md")
 
     elapsed = (datetime.now() - started_at).total_seconds()
     log(f"done in {elapsed:.0f}s: {new_count} new transcript(s), {len(months_written)} month file(s)")
