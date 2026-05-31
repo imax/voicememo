@@ -39,8 +39,7 @@ HOME = Path.home()
 LOG_FILE = HOME / "Library" / "Logs" / "transcribe-memos.log"
 KEY_FILE = HOME / ".config" / "openai" / "api_key"
 CONFIG_FILE = HOME / ".config" / "voicememo" / "config.sh"
-VOCAB_FILE = Path(os.environ.get("VOICEMEMO_VOCAB_FILE",
-                                 HOME / ".config" / "voicememo" / "vocabulary.md"))
+_DEFAULT_VOCAB = HOME / ".config" / "voicememo" / "vocabulary.md"
 
 
 def _load_shared_config() -> dict:
@@ -70,6 +69,8 @@ MEMOS_DIR = BASE_DIR / "Memos"
 # regeneratable from the mp3s, so no reason to sync them anywhere. Override
 # with CACHE_BASE in ~/.config/voicememo/config.sh if you want.
 CACHE_BASE = Path(_cfg.get("CACHE_BASE", str(HOME / "Library" / "Caches" / "voicememo")))
+VOCAB_FILE = Path(os.environ.get("VOICEMEMO_VOCAB_FILE",
+                                 _cfg.get("VOCAB_FILE", str(_DEFAULT_VOCAB))))
 CACHE_DIR = CACHE_BASE / "transcripts"
 PROCESSED_DIR = CACHE_BASE / "processed"
 

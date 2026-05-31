@@ -15,3 +15,8 @@ SONY_BASE="$HOME/Documents/Sony"
 # small files, which crashed the month-rebuild loop. Override only if you
 # know your cache target is not iCloud-managed. See README "macOS gotchas".
 # CACHE_BASE="$HOME/Library/Caches/voicememo"
+
+# Vocabulary file (transcription prompt hint). Defaults to
+# ~/.config/voicememo/vocabulary.md. Point this at your Obsidian/notes vault
+# if you want to edit it alongside your other notes.
+# VOCAB_FILE="$HOME/vaults/main/Memos/vocabulary.md"

@@ -34,15 +34,18 @@ if [ ! -f "$HOME/.config/voicememo/config.sh" ]; then
   cp "$REPO_DIR/config.sh.example" "$HOME/.config/voicememo/config.sh"
   echo "==> seeded $HOME/.config/voicememo/config.sh"
 fi
-if [ ! -f "$HOME/.config/voicememo/vocabulary.md" ]; then
-  cp "$REPO_DIR/vocabulary.md.example" "$HOME/.config/voicememo/vocabulary.md"
-  echo "==> seeded $HOME/.config/voicememo/vocabulary.md (edit to add your names/brands)"
-fi
 . "$HOME/.config/voicememo/config.sh"
 SONY_BASE="${SONY_BASE:-$HOME/Documents/Sony}"
 CACHE_BASE="${CACHE_BASE:-$HOME/Library/Caches/voicememo}"
+VOCAB_FILE="${VOCAB_FILE:-$HOME/.config/voicememo/vocabulary.md}"
+if [ ! -f "$VOCAB_FILE" ]; then
+  mkdir -p "$(dirname "$VOCAB_FILE")"
+  cp "$REPO_DIR/vocabulary.md.example" "$VOCAB_FILE"
+  echo "==> seeded $VOCAB_FILE (edit to add your names/brands)"
+fi
 echo "==> SONY_BASE=$SONY_BASE"
 echo "==> CACHE_BASE=$CACHE_BASE"
+echo "==> VOCAB_FILE=$VOCAB_FILE"
 
 # 3. Working directories. SONY_BASE holds user-facing artifacts (mp3s + monthly
 #    notes); CACHE_BASE holds derived per-mp3 transcripts. They're split so
