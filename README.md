@@ -16,10 +16,12 @@ Auto-sync + transcription pipeline for a Sony IC Recorder on macOS.
 6. Long transcripts get a paragraph-split pass via `gpt-4o-mini` and land in
    `~/Library/Caches/voicememo/processed/<basename>.txt` (short ones are copied
    through).
-7. All processed transcripts for a given month get merged into
-   `~/Sony/Memos/<Month YYYY>.md`, reverse-chronological. Paragraphs that
-   open with a voice-command trigger (`хайлайт`, `туду`, …) are rendered
-   specially — see [Voice commands](#voice-commands).
+7. New transcripts are spliced into `~/Sony/Memos/<Month YYYY>.md` by day
+   (reverse-chronological), append-only: existing entries — including your
+   manual edits — are left untouched (see
+   [Editing notes](#editing-notes-append-only)). Paragraphs that open with a
+   voice-command trigger (`хайлайт`, `туду`, …) are rendered specially — see
+   [Voice commands](#voice-commands).
 
 You get two macOS notifications: "IC Recorder synced" right after copy,
 "Memos transcribed" once the API responses come back.
@@ -63,6 +65,9 @@ Tweak via env vars:
 - `VOICEMEMO_PARAGRAPH_MIN_CHARS` — texts shorter than this skip the
   paragraph-split step. Default `400`.
 - `VOICEMEMO_SKIP_POSTPROCESS=1` — disable paragraph-splitting entirely.
+- `VOICEMEMO_REBUILD=1` — regenerate all month files + `Todos.md` from cache
+  instead of appending. Discards manual edits; see
+  [Editing notes](#editing-notes-append-only).
 
 ## Vocabulary (transcription quality)
 
@@ -81,12 +86,20 @@ project codenames, local places. Don't add global brands, major cities, or
 generic English jargon: the model already knows them, and every general
 term displaces a useful one (the prompt has a ~200-word effective ceiling).
 
-After editing, future recordings pick up the new vocab automatically. To
-re-apply vocab to existing memos, delete their raw transcript:
+After editing, future recordings pick up the new vocab automatically.
+Re-applying vocab to *existing* memos is more involved now that month files are
+append-only: re-transcribing refreshes the cache but won't touch the already-
+merged `.md`. To force a single memo through again, drop its raw transcript and
+its manifest entry (and delete the stale copy from the month file so you don't
+get a duplicate), then re-run:
 ```bash
-rm ~/Library/Caches/voicememo/transcripts/<basename>.txt
+base=<basename>   # e.g. 260507_0952
+rm ~/Library/Caches/voicememo/transcripts/$base.txt ~/Library/Caches/voicememo/processed/$base.txt
+python3 -c "import json,pathlib; p=pathlib.Path.home()/'Library/Caches/voicememo/merged.json'; d=json.load(p.open()); d['merged']=[x for x in d['merged'] if x!='$base']; json.dump(d,p.open('w'))"
+# then remove that entry from ~/Sony/Memos/<Month>.md by hand, and:
 ~/bin/transcribe-memos.py
 ```
+Or just rebuild everything with `VOICEMEMO_REBUILD=1` (discards manual edits).
 
 ## Paragraph splitting
 
@@ -115,23 +128,50 @@ colon, dash, …). A word boundary guards against false hits — "Маркети
 treated as a `марк` todo. A bare trigger with no body after it (e.g. just
 "Хайлайт") falls through as a normal paragraph.
 
-Detection runs at **merge time**, not transcription time — editing the trigger
-list and re-running re-renders every month file (and rebuilds `Todos.md`) for
-free, no transcription API calls. The raw/processed caches stay the source of
-truth, so this is purely a presentation layer; your transcripts are never
-mutated. To change or extend the trigger words, edit `TRIGGER_RE` in
-`transcribe.py`.
+Detection runs at **merge time** (when an entry is first appended to its month
+file), not transcription time. Because month files are append-only (see
+[Editing notes](#editing-notes-append-only)), changing the trigger list only
+affects *future* recordings — already-merged entries keep their original
+rendering. To re-apply new trigger rules to old memos, do a full rebuild
+(`VOICEMEMO_REBUILD=1`), which discards manual edits in the regenerated files.
+To change or extend the trigger words, edit `TRIGGER_RE` in `transcribe.py`.
+
+## Editing notes (append-only)
+
+The month files are **yours to edit** — fix a transcription, add a note,
+reorganize. Normal runs never rewrite what's already there: each new recording
+is spliced into the right day (newest-first) and existing entry bodies are left
+verbatim. Only the whitespace between blocks is normalized.
+
+How it knows what's already merged: a manifest at `$CACHE_BASE/merged.json`
+tracks which transcripts have been written into the `.md` files. It's the
+source of truth for "what's new", *not* the file contents — so:
+
+- **Delete an entry** from a month file and it stays gone (it won't reappear).
+- **Edit an entry's text** and your version survives every future run; the cache
+  still holds the original, but it's never re-injected.
+- The same applies to `Todos.md` — check items off or rewrite lines freely;
+  only genuinely-new todos are appended.
+
+The trade-off: the script can no longer retroactively re-render old entries
+(e.g. after changing trigger rules or the paragraph-split prompt). When you
+*do* want a clean regeneration from the cache, run with **`VOICEMEMO_REBUILD=1`**
+— it rewrites every month file + `Todos.md` from scratch and resets the
+manifest. **This discards manual edits in the regenerated files**, so it's an
+explicit, opt-in escape hatch, not the default.
 
 ## File layout
 
 ```
 $SONY_BASE/Files/                  copied mp3s          (default: ~/Documents/Sony/Files/)
 $SONY_BASE/Memos/<Month YYYY>.md   monthly transcripts   (default: ~/Documents/Sony/Memos/)
-$SONY_BASE/Memos/Todos.md          todos collected from voice commands (rebuilt each run)
+$SONY_BASE/Memos/Todos.md          todos collected from voice commands (append-only)
 $CACHE_BASE/transcripts/           per-mp3 raw transcripts (idempotency cache;
                                      default: ~/Library/Caches/voicememo/transcripts/)
 $CACHE_BASE/processed/             paragraph-split versions; what merge reads
                                      (default: ~/Library/Caches/voicememo/processed/)
+$CACHE_BASE/merged.json            which transcripts are already in the .md files
+                                     (so manual edits aren't clobbered)
 ~/.config/voicememo/config.sh      shared config (sourced by sync.sh + transcribe.py)
 ~/.config/voicememo/vocabulary.md  vocab hint passed to the transcription API
 ~/.config/openai/api_key           OpenAI key, chmod 600 (gitignored, never in repo)
@@ -191,13 +231,17 @@ with the same paths) or add `Memos` to the vault's `.gitignore`.
 # Force-run transcription only
 ~/bin/transcribe-memos.py
 
-# Re-transcribe everything from scratch (will re-spend on cloud)
+# Re-transcribe everything from scratch (will re-spend on cloud).
+# REBUILD regenerates the .md files and resets merged.json — without it the
+# manifest would think everything's already merged and skip the deleted files.
 rm -rf ~/Library/Caches/voicememo/transcripts/* ~/Library/Caches/voicememo/processed/* ~/Documents/Sony/Memos/*.md
-~/bin/transcribe-memos.py
+VOICEMEMO_REBUILD=1 ~/bin/transcribe-memos.py
 
-# Re-paragraph everything (cheap — only the post-process LLM, no transcribe)
+# Re-paragraph everything (cheap — only the post-process LLM, no transcribe).
+# REBUILD is required to push the re-paragraphed text into the month files.
+# WARNING: a rebuild discards manual edits in the regenerated month files.
 rm -rf ~/Library/Caches/voicememo/processed/*
-~/bin/transcribe-memos.py
+VOICEMEMO_REBUILD=1 ~/bin/transcribe-memos.py
 
 # Reload both LaunchAgents after editing a plist (easiest: just rerun install)
 ./install.sh

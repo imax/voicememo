@@ -73,6 +73,10 @@ VOCAB_FILE = Path(os.environ.get("VOICEMEMO_VOCAB_FILE",
                                  _cfg.get("VOCAB_FILE", str(_DEFAULT_VOCAB))))
 CACHE_DIR = CACHE_BASE / "transcripts"
 PROCESSED_DIR = CACHE_BASE / "processed"
+# Which transcripts are already spliced into the month files. Decouples the .md
+# (yours to edit) from the cache (transcription source of truth): a deleted
+# entry stays deleted, a manually-fixed body is never overwritten.
+MERGED_MANIFEST = CACHE_BASE / "merged.json"
 
 API_URL = "https://api.openai.com/v1/audio/transcriptions"
 CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -84,6 +88,12 @@ LANG = os.environ.get("VOICEMEMO_LANG", "uk")
 # they're already one thought, no point spending an API call.
 PARAGRAPH_MIN_CHARS = int(os.environ.get("VOICEMEMO_PARAGRAPH_MIN_CHARS", "400"))
 SKIP_POSTPROCESS = bool(os.environ.get("VOICEMEMO_SKIP_POSTPROCESS"))
+
+# Append-only month files: normal runs splice new recordings into the existing
+# <Month>.md without rewriting what's there, so your manual edits survive. Set
+# VOICEMEMO_REBUILD=1 to force a full regeneration from cache (the old behavior)
+# — useful to reset a file or after bulk cache surgery.
+REBUILD = bool(os.environ.get("VOICEMEMO_REBUILD"))
 
 NAME_RE = re.compile(r"^(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(?:_(\d+))?$")
 
@@ -98,6 +108,14 @@ TRIGGER_RE = re.compile(
 )
 HIGHLIGHT_WORDS = {"хайлайт"}
 TODO_WORDS = {"туду", "задача", "марк", "запиши"}
+
+# Structural anchors for parsing month files / Todos.md back into entries.
+# Only these (headers + time markers) are interpreted; everything else is body
+# text preserved verbatim, so manual edits survive an append.
+DAY_HEADER_RE = re.compile(r"^##\s+(\d{1,2})\s+(\S+)")
+ENTRY_MARKER_RE = re.compile(r"^\*\*(\d{2}):(\d{2})(?: \(cont\. (\d+)\))?\*\*\s*$")
+TODO_DAY_RE = re.compile(r"^##\s+.*\((\d{4})-(\d{2})-(\d{2})\)")
+TODO_TIME_RE = re.compile(r"^\s*-\s+\*\*(\d{2}):(\d{2})\*\*")
 
 
 def classify_paragraph(para: str) -> tuple[str, str]:
@@ -334,9 +352,23 @@ UK_MONTHS_GEN = [
 ]
 
 
+UK_MONTH_TO_NUM = {name: i for i, name in enumerate(UK_MONTHS_GEN) if name}
+
+
 def format_uk_date(iso_date: str) -> str:
     _, mm, dd = iso_date.split("-")
     return f"{int(dd)} {UK_MONTHS_GEN[int(mm)]}"
+
+
+def parse_uk_day_header(line: str, year: int):
+    """'## 9 травня' -> (year, 5, 9). None if the header isn't our day format."""
+    m = DAY_HEADER_RE.match(line)
+    if not m:
+        return None
+    mon = UK_MONTH_TO_NUM.get(m.group(2))
+    if not mon:
+        return None
+    return (year, mon, int(m.group(1)))
 
 
 def render_entry_text(text: str, date: str, time: str, todos: list) -> str:
@@ -359,10 +391,13 @@ def render_entry_text(text: str, date: str, time: str, todos: list) -> str:
     return "\n\n".join(rendered)
 
 
-def merge_month(year: int, month: int, entries: list, todos: list) -> Path:
-    # Filename "May 2026.md". No H1 — filename is the title.
-    # Reverse-chronological: newest day on top, newest recording within a day on top.
-    # Day header: ## 9 травня. Recording header: **HH:MM**.
+def rebuild_month(year: int, month: int, entries: list, todos: list) -> Path:
+    """Regenerate a whole <Month YYYY>.md from cache (the --rebuild path only).
+
+    Reverse-chronological: newest day on top, newest recording within a day on
+    top. Day header: ## 9 травня. Recording header: **HH:MM**. This clobbers any
+    manual edits, so normal runs use append_to_month instead.
+    """
     out = MEMOS_DIR / f"{MONTH_NAMES[month]} {year}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -386,16 +421,165 @@ def merge_month(year: int, month: int, entries: list, todos: list) -> Path:
     return out
 
 
-def write_todos(todos: list) -> Path | None:
-    """Aggregate todos collected across all months into Memos/Todos.md."""
+# --- Append-only month files -------------------------------------------------
+#
+# Normal runs never rewrite an existing <Month>.md. We parse it into day
+# sections (anchored on the stable `## DD month` headers) and recording blocks
+# (anchored on `**HH:MM**` markers), splice in only the new recordings, then
+# re-serialize. Recording bodies are kept verbatim — only inter-block
+# whitespace is normalized and blocks are re-sorted into reverse-chronological
+# order — so your manual edits to the text survive untouched.
+
+def parse_month_file(path: Path, year: int):
+    """Parse a month file into (preamble, [day]). Each day is
+    {key:(y,m,d)|None, header:str, prelude:[str], entries:[{tkey, lines:[str]}]}.
+    Unrecognized lines become body/prelude text and are preserved on re-write.
+    """
+    preamble: list = []
+    days: list = []
+    if not path.exists():
+        return preamble, days
+    cur_day = None
+    cur_entry = None
+    for raw in read_text_robust(path).splitlines():
+        line = raw.rstrip()
+        if line.startswith("## "):
+            cur_day = {"key": parse_uk_day_header(line, year), "header": line,
+                       "prelude": [], "entries": []}
+            days.append(cur_day)
+            cur_entry = None
+            continue
+        if cur_day is None:
+            preamble.append(line)
+            continue
+        m = ENTRY_MARKER_RE.match(line)
+        if m:
+            cur_entry = {"tkey": (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)),
+                         "lines": [line]}
+            cur_day["entries"].append(cur_entry)
+            continue
+        if cur_entry is not None:
+            cur_entry["lines"].append(line)
+        else:
+            cur_day["prelude"].append(line)
+    return preamble, days
+
+
+def serialize_month(preamble: list, days: list) -> str:
+    days = sorted(days, key=lambda d: d["key"] or (0, 0, 0), reverse=True)
+    out: list = [l for l in preamble if l.strip()]
+    for d in days:
+        if out:
+            out.append("")
+        out.append(d["header"])
+        out.append("")
+        prelude = "\n".join(d["prelude"]).strip()
+        if prelude:
+            out.append(prelude)
+            out.append("")
+        for e in sorted(d["entries"], key=lambda e: e["tkey"], reverse=True):
+            out.append(e["lines"][0])
+            out.append("")
+            body = "\n".join(e["lines"][1:]).strip()
+            if body:
+                out.append(body)
+                out.append("")
+    return "\n".join(out).strip("\n") + "\n"
+
+
+def append_to_month(year: int, month: int, entries: list) -> Path:
+    """Splice already-rendered `entries` into <Month>.md by day, leaving every
+    other day and body untouched. Entries carry pre-rendered `text`."""
+    out = MEMOS_DIR / f"{MONTH_NAMES[month]} {year}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    preamble, days = parse_month_file(out, year)
+    by_key = {d["key"]: d for d in days if d["key"]}
+    for e in entries:
+        key = tuple(e["sort_key"][:3])
+        day = by_key.get(key)
+        if day is None:
+            day = {"key": key, "header": f"## {format_uk_date(e['date'])}",
+                   "prelude": [], "entries": []}
+            days.append(day)
+            by_key[key] = day
+        suffix = f" (cont. {e['segment']})" if e["segment"] else ""
+        h, mi = e["time"].split(":")
+        day["entries"].append({
+            "tkey": (int(h), int(mi), e["segment"]),
+            "lines": [f"**{e['time']}{suffix}**"] + e["text"].strip().split("\n"),
+        })
+    out.write_text(serialize_month(preamble, days))
+    return out
+
+
+# --- Todos.md (same day-grouped, append-only model) --------------------------
+
+def parse_todos_file(path: Path):
+    """Parse Todos.md into (title, [day]). day: {key, header, items:[{tkey, line}]}.
+    Item lines are kept verbatim so check-offs / manual edits survive."""
+    title = "# Todos"
+    days: list = []
+    if not path.exists():
+        return title, days
+    cur = None
+    for raw in read_text_robust(path).splitlines():
+        line = raw.rstrip()
+        m = TODO_DAY_RE.match(line)
+        if m:
+            cur = {"key": (int(m.group(1)), int(m.group(2)), int(m.group(3))),
+                   "header": line, "items": []}
+            days.append(cur)
+            continue
+        if line.startswith("# ") and not line.startswith("##"):
+            title = line
+            continue
+        if cur is not None and line.lstrip().startswith("- "):
+            tm = TODO_TIME_RE.match(line)
+            tkey = (int(tm.group(1)), int(tm.group(2))) if tm else (0, 0)
+            cur["items"].append({"tkey": tkey, "line": line})
+    return title, days
+
+
+def serialize_todos(title: str, days: list) -> str:
+    days = sorted(days, key=lambda d: d["key"], reverse=True)
+    out = [title, ""]
+    for d in days:
+        out.append(d["header"])
+        out.append("")
+        for it in sorted(d["items"], key=lambda i: i["tkey"], reverse=True):
+            out.append(it["line"])
+        out.append("")
+    return "\n".join(out).strip("\n") + "\n"
+
+
+def append_to_todos(new_todos: list) -> None:
+    if not new_todos:
+        return
+    out = MEMOS_DIR / "Todos.md"
+    title, days = parse_todos_file(out)
+    by_key = {d["key"]: d for d in days}
+    for t in new_todos:
+        key = (int(t["date"][0:4]), int(t["date"][5:7]), int(t["date"][8:10]))
+        day = by_key.get(key)
+        if day is None:
+            day = {"key": key, "header": f"## {format_uk_date(t['date'])} ({t['date']})",
+                   "items": []}
+            days.append(day)
+            by_key[key] = day
+        h, mi = t["time"].split(":")
+        day["items"].append({"tkey": (int(h), int(mi)),
+                             "line": f"- **{t['time']}** {t['text']}"})
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(serialize_todos(title, days))
+
+
+def write_todos_full(todos: list) -> None:
+    """Full regeneration of Todos.md (the --rebuild path only)."""
     out = MEMOS_DIR / "Todos.md"
     if not todos:
-        # Keep the file fresh: if everything's been edited away, leave an empty stub
-        # rather than a stale list from the previous run.
         if out.exists():
             out.write_text("# Todos\n\n_(порожньо)_\n")
-        return None
-    # Newest day first; newest entry within a day first.
+        return
     todos = sorted(todos, key=lambda t: (t["date"], t["time"]), reverse=True)
     lines = ["# Todos", ""]
     current_date = None
@@ -408,7 +592,81 @@ def write_todos(todos: list) -> Path | None:
             current_date = t["date"]
         lines.append(f"- **{t['time']}** {t['text']}")
     out.write_text("\n".join(lines) + "\n")
-    return out
+
+
+# --- Merge-state manifest ----------------------------------------------------
+
+def load_manifest():
+    """Set of basenames already spliced into month files, or None if there is
+    no manifest yet (first run under the append-only model)."""
+    if not MERGED_MANIFEST.exists():
+        return None
+    try:
+        data = json.loads(read_text_robust(MERGED_MANIFEST))
+        return set(data.get("merged", []))
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        log(f"manifest read failed ({exc}); treating as empty")
+        return set()
+
+
+def save_manifest(merged) -> None:
+    MERGED_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MERGED_MANIFEST.with_name(MERGED_MANIFEST.name + ".tmp")
+    tmp.write_text(json.dumps({"merged": sorted(merged)}, ensure_ascii=False))
+    tmp.replace(MERGED_MANIFEST)
+
+
+def reconcile(all_entries: dict, manifest, preexisting: set) -> list:
+    """Turn the processed-transcript cache into month files + Todos.md.
+
+    `all_entries`: {basename: entry} for every non-empty processed transcript.
+    `manifest`: set of basenames already in the .md files, or None on the first
+    append-only run. `preexisting`: basenames present before this run started.
+
+    Returns the list of month labels that were written/touched. Updates the
+    manifest. Under VOICEMEMO_REBUILD everything is regenerated from scratch;
+    otherwise only genuinely-new transcripts are spliced in (append-only).
+    """
+    if REBUILD:
+        by_month: dict = defaultdict(list)
+        for e in all_entries.values():
+            by_month[(e["sort_key"][0], e["sort_key"][1])].append(e)
+        todos: list = []
+        months_written = []
+        for (year, month), entries in by_month.items():
+            entries.sort(key=lambda e: e["sort_key"])
+            rebuild_month(year, month, entries, todos)
+            months_written.append(f"{MONTH_NAMES[month]} {year}")
+        write_todos_full(todos)
+        save_manifest(set(all_entries))
+        log(f"rebuild: regenerated {len(months_written)} month file(s), "
+            f"{len(todos)} todo(s); manifest reset to {len(all_entries)} entries")
+        return months_written
+
+    # Append-only. `merged` = what's assumed already in the .md files; on the
+    # first run (no manifest) that's whatever existed on disk before this run.
+    merged = manifest if manifest is not None else preexisting
+    new = [e for bn, e in all_entries.items() if bn not in merged]
+    by_month: dict = defaultdict(list)
+    for e in new:
+        by_month[(e["sort_key"][0], e["sort_key"][1])].append(e)
+    todos: list = []
+    months_written = []
+    for (year, month), entries in by_month.items():
+        entries.sort(key=lambda e: e["sort_key"])
+        for e in entries:
+            e["text"] = render_entry_text(e["text"], e["date"], e["time"], todos)
+        append_to_month(year, month, entries)
+        months_written.append(f"{MONTH_NAMES[month]} {year}")
+    append_to_todos(todos)
+    save_manifest(set(merged) | set(all_entries))
+    if manifest is None:
+        log(f"bootstrap: assumed {len(merged)} entr(ies) already in files; "
+            f"appended {len(new)} new, {len(todos)} todo(s)")
+    else:
+        log(f"incremental: appended {len(new)} new entr(ies) to "
+            f"{len(months_written)} month file(s), {len(todos)} new todo(s)")
+    return months_written
 
 
 def main() -> int:
@@ -432,6 +690,10 @@ def main() -> int:
                if not ((CACHE_DIR / (m.stem + ".txt")).exists()
                        and (CACHE_DIR / (m.stem + ".txt")).stat().st_size > 0)]
     log(f"queue: {len(pending)} new of {len(mp3s)} mp3s")
+    # Snapshot which transcripts already exist before we materialize new ones.
+    # On the first append-only run (no manifest) we assume these are already in
+    # the month files and seed the manifest from them, leaving the files alone.
+    preexisting = {p.stem for p in PROCESSED_DIR.glob("*.txt") if p.stat().st_size > 0}
     new_count = 0
     for mp3 in mp3s:
         raw = CACHE_DIR / (mp3.stem + ".txt")
@@ -443,7 +705,7 @@ def main() -> int:
         if not (processed.exists() and processed.stat().st_size > 0):
             materialize_processed(raw, processed, api_key)
 
-    by_month: dict[tuple[int, int], list[dict]] = defaultdict(list)
+    all_entries: dict[str, dict] = {}
     for txt in PROCESSED_DIR.glob("*.txt"):
         info = parse_name(txt.stem)
         if not info:
@@ -451,24 +713,15 @@ def main() -> int:
         text = read_text_robust(txt).strip()
         if not text:
             continue
-        year, month = info["sort_key"][0], info["sort_key"][1]
-        by_month[(year, month)].append({
+        all_entries[txt.stem] = {
             "date": info["date"],
             "time": info["time"],
             "segment": info["segment"],
             "sort_key": info["sort_key"],
             "text": text,
-        })
+        }
 
-    months_written = []
-    todos: list[dict] = []
-    for (year, month), entries in by_month.items():
-        entries.sort(key=lambda e: e["sort_key"])
-        merge_month(year, month, entries, todos)
-        months_written.append(f"{MONTH_NAMES[month]} {year}")
-    write_todos(todos)
-    if todos:
-        log(f"todos: {len(todos)} collected → Todos.md")
+    months_written = reconcile(all_entries, load_manifest(), preexisting)
 
     elapsed = (datetime.now() - started_at).total_seconds()
     log(f"done in {elapsed:.0f}s: {new_count} new transcript(s), {len(months_written)} month file(s)")
