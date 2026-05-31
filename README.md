@@ -17,7 +17,9 @@ Auto-sync + transcription pipeline for a Sony IC Recorder on macOS.
    `~/Library/Caches/voicememo/processed/<basename>.txt` (short ones are copied
    through).
 7. All processed transcripts for a given month get merged into
-   `~/Sony/Memos/<Month YYYY>.md`, reverse-chronological.
+   `~/Sony/Memos/<Month YYYY>.md`, reverse-chronological. Paragraphs that
+   open with a voice-command trigger (`хайлайт`, `туду`, …) are rendered
+   specially — see [Voice commands](#voice-commands).
 
 You get two macOS notifications: "IC Recorder synced" right after copy,
 "Memos transcribed" once the API responses come back.
@@ -96,11 +98,36 @@ topic shifts, change zero words. The result lands in
 can blow away `processed/` and re-paragraph everything (free, no transcribe
 API calls) after tweaking the prompt.
 
+## Voice commands
+
+You can shape how a paragraph renders by opening it with a trigger word — say
+it out loud at the start of a thought while recording. The trigger is detected
+per **paragraph** (so one memo can mix normal text, highlights, and todos), and
+the trigger word itself is stripped from the output.
+
+| Spoken opener | Effect |
+|---|---|
+| `хайлайт …` | Wraps the paragraph in `==…==` (Obsidian highlight) in the month file. |
+| `туду …` / `задача …` / `марк …` / `запиши …` | Keeps the paragraph as normal text in the month file **and** collects it into `~/Sony/Memos/Todos.md`, reverse-chronological with date + time. |
+
+The opener is matched case-insensitively, followed by a separator (space,
+colon, dash, …). A word boundary guards against false hits — "Маркетинг" is not
+treated as a `марк` todo. A bare trigger with no body after it (e.g. just
+"Хайлайт") falls through as a normal paragraph.
+
+Detection runs at **merge time**, not transcription time — editing the trigger
+list and re-running re-renders every month file (and rebuilds `Todos.md`) for
+free, no transcription API calls. The raw/processed caches stay the source of
+truth, so this is purely a presentation layer; your transcripts are never
+mutated. To change or extend the trigger words, edit `TRIGGER_RE` in
+`transcribe.py`.
+
 ## File layout
 
 ```
 $SONY_BASE/Files/                  copied mp3s          (default: ~/Documents/Sony/Files/)
 $SONY_BASE/Memos/<Month YYYY>.md   monthly transcripts   (default: ~/Documents/Sony/Memos/)
+$SONY_BASE/Memos/Todos.md          todos collected from voice commands (rebuilt each run)
 $CACHE_BASE/transcripts/           per-mp3 raw transcripts (idempotency cache;
                                      default: ~/Library/Caches/voicememo/transcripts/)
 $CACHE_BASE/processed/             paragraph-split versions; what merge reads
