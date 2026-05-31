@@ -257,6 +257,18 @@ tail -20 ~/Library/Logs/transcribe-memos.err.log
 launchctl kickstart -k "gui/$(id -u)/com.maxua.transcribe-memos"
 ```
 
+## Tests
+
+`test_transcribe.py` covers the append/merge logic — day insertion ordering,
+manual-edit preservation, the bootstrap/incremental/rebuild paths, and the
+Todos.md check-off round-trip. Zero dependencies, runs on stock `python3`;
+each test isolates its output into a temp dir, so it never touches the vault.
+
+```bash
+./test_transcribe.py        # or: python3 test_transcribe.py
+pytest test_transcribe.py   # also works if pytest is installed
+```
+
 ## macOS gotchas
 
 - `~/Documents` is TCC-protected AND iCloud-synced when "Desktop & Documents
