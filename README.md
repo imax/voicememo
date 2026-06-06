@@ -6,7 +6,9 @@ Auto-sync + transcription pipeline for a Sony IC Recorder on macOS.
 
 1. You plug in the recorder (mounts as `/Volumes/IC RECORDER`).
 2. macOS launchd fires `sync-ic-recorder.sh` on the mount event.
-3. The script `rsync`s new `.mp3`s from `REC_FILE/FOLDER01/` to `~/Sony/Files/`.
+3. The script `rsync`s new `.mp3`s from every `REC_FILE/FOLDER*/` (the Sony
+   rolls over from `FOLDER01` to `FOLDER01_02` etc. as folders fill up) into
+   the flat `~/Sony/Files/` dir.
 4. It then kicks off `transcribe.py` via its own LaunchAgent (so the
    transcribe process survives the sync script exiting — a plain
    backgrounded child gets reaped with the sync job's process group).
